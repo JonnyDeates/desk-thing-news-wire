@@ -27,9 +27,19 @@ let latest: Story[] = [];
 let timer: ReturnType<typeof setInterval> | null = null;
 let settingsDebounce: ReturnType<typeof setTimeout> | null = null;
 let starting = false;
-// DeskThing.getSettings() internally fires a SETTINGS event to deliver its response,
-// which would re-trigger our SETTINGS handler and loop forever. Suppress while reading.
-let suppressSettings = 0;
+// DeskThing.getSettings() internally delivers its response via a SETTINGS event, which
+// would re-trigger our SETTINGS handler and loop forever. We hash the setting values and
+// only act when the hash actually changes — the self-response matches the last hash.
+let lastSettingsHash: string | null = null;
+
+function hashSettings(payload: unknown): string {
+  const s = payload as Record<string, { value?: unknown }> | undefined;
+  return JSON.stringify({
+    feed_urls: s?.feed_urls?.value ?? null,
+    refresh_minutes: s?.refresh_minutes?.value ?? null,
+    scroll_speed: s?.scroll_speed?.value ?? null,
+  });
+}
 
 const setupSettings = async () => {
   await DeskThing.initSettings({
@@ -63,22 +73,18 @@ const setupSettings = async () => {
 };
 
 const readSettings = async () => {
-  suppressSettings++;
-  try {
-    const s = await DeskThing.getSettings();
-    const rawUrls = (s?.feed_urls?.value as string | undefined) ?? DEFAULT_FEED_URLS;
-    const feedUrls = rawUrls
-      .split(/[,\n]+/)
-      .map((u) => u.trim())
-      .filter(Boolean);
-    const refreshMin = Number(s?.refresh_minutes?.value ?? 15);
-    const scrollSpeed = Math.max(1, Math.min(10, Number(s?.scroll_speed?.value ?? 3)));
-    return { feedUrls, refreshMin, scrollSpeed };
-  } finally {
-    // Release after a microtask so any sync SETTINGS listener triggered by the
-    // getSettings response has already fired and been ignored.
-    queueMicrotask(() => { suppressSettings--; });
-  }
+  const s = await DeskThing.getSettings();
+  // Record the hash of what we just read so the SETTINGS event delivered as
+  // the response to this getSettings is recognized as a no-op by the handler.
+  lastSettingsHash = hashSettings(s);
+  const rawUrls = (s?.feed_urls?.value as string | undefined) ?? DEFAULT_FEED_URLS;
+  const feedUrls = rawUrls
+    .split(/[,\n]+/)
+    .map((u) => u.trim())
+    .filter(Boolean);
+  const refreshMin = Number(s?.refresh_minutes?.value ?? 15);
+  const scrollSpeed = Math.max(1, Math.min(10, Number(s?.scroll_speed?.value ?? 3)));
+  return { feedUrls, refreshMin, scrollSpeed };
 };
 
 const refresh = async () => {
@@ -140,10 +146,14 @@ DeskThing.on(DESKTHING_EVENTS.START, async () => {
   starting = false;
 });
 
-DeskThing.on(DESKTHING_EVENTS.SETTINGS, () => {
-  // initSettings during START fires this too; debounce so we only rebuild once.
-  // getSettings also fires it (as its response channel); suppressSettings blocks that.
-  if (starting || suppressSettings > 0) return;
+DeskThing.on(DESKTHING_EVENTS.SETTINGS, (event) => {
+  // initSettings during START fires this too; the starting flag suppresses that.
+  if (starting) return;
+  // Hash the payload — the SETTINGS event delivered as the response to our own
+  // getSettings call will match the hash recorded by readSettings and be ignored.
+  const hash = hashSettings((event as { payload?: unknown })?.payload);
+  if (hash === lastSettingsHash) return;
+  lastSettingsHash = hash;
   if (settingsDebounce) clearTimeout(settingsDebounce);
   settingsDebounce = setTimeout(async () => {
     settingsDebounce = null;
