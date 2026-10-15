@@ -29,14 +29,24 @@ jobs:
       - name: Resolve version
         id: version
         run: |
+          # Use the manifest's version — it's what names the built zip and what DeskThing reads.
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION=$(node -p "require('./package.json').version")
+            VERSION=$(node -p "require('./deskthing/manifest.json').version")
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
           echo "Releasing v$VERSION"
+
+      - name: Verify package.json and manifest.json agree
+        run: |
+          PKG=$(node -p "require('./package.json').version")
+          MAN=$(node -p "require('./deskthing/manifest.json').version")
+          if [ "$PKG" != "$MAN" ]; then
+            echo "::error::Version mismatch — package.json=$PKG, manifest.json=$MAN"
+            exit 1
+          fi
 
       - name: Build
         run: npm run build
